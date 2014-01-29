@@ -1,0 +1,124 @@
+##
+# Copyright 2013 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License").
+# You may not use this file except in compliance with the License.
+# A copy of the License is located at
+#
+#  http://aws.amazon.com/apache2.0
+#
+# or in the "license" file accompanying this file. This file is distributed
+# on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
+# express or implied. See the License for the specific language governing
+# permissions and limitations under the License.
+##
+
+require "aws/decider"
+require "aws/core"
+include AWS::Flow
+
+module Deployable
+  attr_accessor :host, :depends_on, :url
+
+  def initialize(host, depends_on, url)
+    @host = host
+    @depends_on = depends_on
+    @url = url
+  end
+
+  def deploy(activity_client)
+    deployable_urls = @depends_on.map {|x| x.url } unless @depends_on.nil?
+    task do
+      wait_for_all(deployable_urls) unless deployable_urls.nil?
+      url.set(deploy_self(activity_client))
+    end
+  end
+
+  def transform_futures(futures)
+    values = futures.map {|future| future.url.get if future.url.is_a? Future}
+    values.compact unless values.nil?
+  end
+
+  def deploy_self(activity_client)
+    # Fill me in inside a sublass for polymorphic magic!
+  end
+end
+
+class LoadBalancer
+  include Deployable
+
+  attr_accessor :web_servers
+  def initialize(host, web_servers)
+    @webservers = web_servers
+    super host, web_servers, Future.new
+  end
+
+  def deploy_self(activity_client)
+    web_server_urls = transform_futures(@webservers)
+    activity_client.deploy_load_balancer(web_server_urls)
+  end
+
+end
+
+class AppServer
+  include Deployable
+
+  attr_accessor :databases
+
+  def initialize(host, databases)
+    @databases = databases
+    super host, databases, Future.new
+  end
+
+  def deploy_self(activity_client)
+    data_sources = transform_futures(@databases)
+    activity_client.deploy_app_server(data_sources)
+  end
+end
+
+class WebServer
+  include Deployable
+  attr_accessor :databases, :app_servers
+
+  def initialize(host, databases,app_servers)
+    @databases = databases
+    @app_servers = app_servers
+    super host, databases.concat(app_servers), Future.new
+  end
+
+  def deploy_self(activity_client)
+    data_sources = transform_futures(@databases)
+    app_server_urls = transform_futures(@app_servers)
+    activity_client.deploy_web_server(data_sources, app_server_urls)
+  end
+end
+
+class Database
+  include Deployable
+
+  def initialize(host)
+    super host, nil, Future.new
+  end
+
+  def deploy_self(activity_client)
+    activity_client.deploy_database
+  end
+end
+
+class ApplicationStack
+
+  attr_accessor :components, :frontend_component, :activity_client
+  def initialize(components, frontend_component, activity_client)
+    @components = components
+    @frontend_component = frontend_component
+    @activity_client = activity_client
+  end
+
+  def deploy
+    @components.each { |x| x.deploy(@activity_client) if x.is_a? Deployable }
+  end
+
+  def get_url
+    @frontend_component.url
+  end
+end
